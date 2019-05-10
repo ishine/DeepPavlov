@@ -1,71 +1,67 @@
-"""
-Copyright 2017 Neural Networks and Deep Learning lab, MIPT
+# Copyright 2017 Neural Networks and Deep Learning lab, MIPT
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
+import inspect
 from abc import abstractmethod
-from pathlib import Path
-from warnings import warn
+from copy import deepcopy
+from logging import getLogger
+from typing import Optional, List, Union
 
+import numpy as np
 import tensorflow as tf
-import keras.metrics
-import keras.optimizers
-from typing import Dict
-from overrides import overrides
-from .tf_backend import TfModelMeta
 from keras import backend as K
-from keras.models import Model
-from keras.layers import Dense, Input
+from overrides import overrides
 
-from deeppavlov.core.models.trainable import Trainable
-from deeppavlov.core.models.inferable import Inferable
-from deeppavlov.core.common.attributes import check_attr_true
-from deeppavlov.core.common.file import save_json, read_json
-from deeppavlov.core.common.errors import ConfigError
+from deeppavlov.core.models.nn_model import NNModel
+from deeppavlov.core.models.tf_backend import TfModelMeta
+from deeppavlov.core.models.lr_scheduled_model import LRScheduledModel
 
 
-class KerasModel(Trainable, Inferable, metaclass=TfModelMeta):
+log = getLogger(__name__)
+
+
+class KerasModel(NNModel, metaclass=TfModelMeta):
     """
-    Class builds keras model with tensorflow backend
+    Builds Keras model with TensorFlow backend.
+
+    Attributes:
+        epochs_done: number of epochs that were done
+        batches_seen: number of epochs that were seen
+        train_examples_seen: number of training samples that were seen
+        sess: tf session
     """
 
-    def __init__(self, opt: Dict, **kwargs):
+    def __init__(self, **kwargs) -> None:
         """
-        Initialize model using parameters from opt
+        Initialize model using keyword parameters
+
         Args:
-            opt: model parameters
-            *args:
-            **kwargs:
+            kwargs (dict): Dictionary with model parameters
         """
-        self.opt = opt
-        save_path = kwargs.get('save_path', None)
-        load_path = kwargs.get('load_path', None)
-        train_now = self.opt.get('train_now', False)
-        url = self.opt.get('url', None)
+        self.epochs_done = 0
+        self.batches_seen = 0
+        self.train_examples_seen = 0
 
-        super().__init__(save_path=save_path,
-                         load_path=load_path,
-                         train_now=train_now,
-                         url=url,
-                         mode=kwargs['mode'])
+        super().__init__(save_path=kwargs.get("save_path"),
+                         load_path=kwargs.get("load_path"),
+                         mode=kwargs.get("mode"))
 
-        self.sess = self._config_session()
-        K.set_session(self.sess)
-
-    def _config_session(self):
+    @staticmethod
+    def _config_session():
         """
         Configure session for particular device
+
         Returns:
             tensorflow.Session
         """
@@ -74,237 +70,225 @@ class KerasModel(Trainable, Inferable, metaclass=TfModelMeta):
         config.gpu_options.visible_device_list = '0'
         return tf.Session(config=config)
 
-    def init_model_from_scratch(self, model_name, optimizer_name,
-                                lr, decay, loss_name, metrics_names=None, add_metrics_file=None,
-                                loss_weights=None,
-                                sample_weight_mode=None, weighted_metrics=None,
-                                target_tensors=None):
-        """
-        Initialize model from scratch with given params
-        Args:
-            model_name: name of model function described as a method of this class
-            optimizer_name: name of optimizer from keras.optimizers
-            lr: learning rate
-            decay: learning rate decay
-            loss_name: loss function name (from keras.losses)
-            metrics_names: names of metrics (from keras.metrics) as one string
-            add_metrics_file: file with additional metrics functions
-            loss_weights: optional parameter as in keras.model.compile
-            sample_weight_mode: optional parameter as in keras.model.compile
-            weighted_metrics: optional parameter as in keras.model.compile
-            target_tensors: optional parameter as in keras.model.compile
-
-        Returns:
-            compiled model with given network and learning parameters
-        """
-        print("\n:: initializing `{}` from scratch\n"\
-              .format(self.__class__.__name__))
-
-        model_func = getattr(self, model_name, None)
-        if callable(model_func):
-            model = model_func(params=self.opt)
-        else:
-            raise AttributeError("Model {} is not defined".format(model_name))
-
-        optimizer_func = getattr(keras.optimizers, optimizer_name, None)
-        if callable(optimizer_func):
-            optimizer_ = optimizer_func(lr=lr, decay=decay)
-        else:
-            raise AttributeError("Optimizer {} is not callable".format(optimizer_name))
-
-        loss_func = getattr(keras.losses, loss_name, None)
-        if callable(loss_func):
-            loss = loss_func
-        else:
-            raise AttributeError("Loss {} is not defined".format(loss_name))
-
-        metrics_funcs = []
-        for i in range(len(metrics_names)):
-            metrics_func = getattr(keras.metrics, metrics_names[i], None)
-            if callable(metrics_func):
-                metrics_funcs.append(metrics_func)
-            else:
-                metrics_func = getattr(add_metrics_file, metrics_names[i], None)
-                if callable(metrics_func):
-                    metrics_funcs.append(metrics_func)
-                else:
-                    raise AttributeError("Metric {} is not defined".format(metrics_names[i]))
-
-        model.compile(optimizer=optimizer_,
-                      loss=loss,
-                      metrics=metrics_funcs,
-                      loss_weights=loss_weights,  # None
-                      sample_weight_mode=sample_weight_mode,  # None
-                      weighted_metrics=weighted_metrics,  # None
-                      target_tensors=target_tensors)  # None
-        return model
-
-    @overrides
-    def load(self, model_name, optimizer_name,
-             lr, decay, loss_name, metrics_names=None, add_metrics_file=None, loss_weights=None,
-             sample_weight_mode=None, weighted_metrics=None, target_tensors=None):
-        """
-        Initialize model from saved params and weights
-        Args:
-            model_name: name of model function described as a method of this class
-            optimizer_name: name of optimizer from keras.optimizers
-            lr: learning rate
-            decay: learning rate decay
-            loss_name: loss function name (from keras.losses)
-            metrics_names: names of metrics (from keras.metrics) as one string
-            add_metrics_file: file with additional metrics functions
-            loss_weights: optional parameter as in keras.model.compile
-            sample_weight_mode: optional parameter as in keras.model.compile
-            weighted_metrics: optional parameter as in keras.model.compile
-            target_tensors: optional parameter as in keras.model.compile
-
-        Returns:
-            model with loaded weights and network parameters from files
-            but compiled with given learning parameters
-        """
-        if self.load_path:
-            if isinstance(self.load_path, Path) and not self.load_path.parent.is_dir():
-                raise ConfigError("Provided save path is incorrect!")
-
-            opt_path = Path("{}_opt.json".format(str(self.load_path.resolve())))
-            weights_path = Path("{}.h5".format(str(self.load_path.resolve())))
-
-            if opt_path.exists() and weights_path.exists():
-
-                print("\n:: initializing `{}` from saved\n"\
-                      .format(self.__class__.__name__))
-
-                self.opt = read_json(opt_path)
-            
-                model_func = getattr(self, model_name, None)
-                if callable(model_func):
-                    model = model_func(params=self.opt)
-                else:
-                    raise AttributeError("Model {} is not defined".format(model_name))
-
-                print("[ loading weights from `{}` ]".format(weights_path.name))
-                model.load_weights(str(weights_path))
-
-                optimizer_func = getattr(keras.optimizers, optimizer_name, None)
-                if callable(optimizer_func):
-                    optimizer_ = optimizer_func(lr=lr, decay=decay)
-                else:
-                    raise AttributeError("Optimizer {} is not callable".format(optimizer_name))
-
-                loss_func = getattr(keras.losses, loss_name, None)
-                if callable(loss_func):
-                    loss = loss_func
-                else:
-                    raise AttributeError("Loss {} is not defined".format(loss_name))
-
-                metrics_funcs = []
-                for i in range(len(metrics_names)):
-                    metrics_func = getattr(keras.metrics, metrics_names[i], None)
-                    if callable(metrics_func):
-                        metrics_funcs.append(metrics_func)
-                    else:
-                        metrics_func = getattr(add_metrics_file, metrics_names[i], None)
-                        if callable(metrics_func):
-                            metrics_funcs.append(metrics_func)
-                        else:
-                            raise AttributeError(
-                                "Metric {} is not defined".format(metrics_names[i]))
-
-                model.compile(optimizer=optimizer_,
-                              loss=loss,
-                              metrics=metrics_funcs,
-                              loss_weights=loss_weights,
-                              sample_weight_mode=sample_weight_mode,
-                              weighted_metrics=weighted_metrics,
-                              target_tensors=target_tensors)
-                return model
-            else:
-                return self.init_model_from_scratch(model_name, optimizer_name,
-                                                    lr, decay, loss_name,
-                                                    metrics_names=metrics_names,
-                                                    add_metrics_file=add_metrics_file,
-                                                    loss_weights=loss_weights,
-                                                    sample_weight_mode=sample_weight_mode,
-                                                    weighted_metrics=weighted_metrics,
-                                                    target_tensors=target_tensors)
-        else:
-            warn("No `load_path` is provided for {}".format(self.__class__.__name__))
-            return self.init_model_from_scratch(model_name, optimizer_name,
-                                                lr, decay, loss_name, metrics_names=metrics_names,
-                                                add_metrics_file=add_metrics_file,
-                                                loss_weights=loss_weights,
-                                                sample_weight_mode=sample_weight_mode,
-                                                weighted_metrics=weighted_metrics,
-                                                target_tensors=target_tensors)
-
     @abstractmethod
-    def train_on_batch(self, batch):
-        """
-        Train the model on a single batch of data
-        Args:
-            batch: tuple of (x,y) where x, y - lists of samples and their labels
-
-        Returns:
-            metrics values on a given batch
-        """
+    def load(self, *args, **kwargs) -> None:
         pass
 
     @abstractmethod
-    @check_attr_true('train_now')
-    def train(self, dataset, *args):
-        """
-        Train the model on a given data as a single batch
-        Args:
-            dataset: dataset instance
-
-        Returns:
-            metrics values on a given data
-        """
+    def save(self, *args, **kwargs) -> None:
         pass
 
-    @overrides
-    def save(self, fname=None):
+    def process_event(self, event_name: str, data: dict) -> None:
         """
-        Save the model parameters into <<fname>>_opt.json (or <<ser_file>>_opt.json)
-        and model weights into <<fname>>.h5 (or <<ser_file>>.h5)
+        Process event after epoch
         Args:
-            fname: file_path to save model. If not explicitly given seld.opt["ser_file"] will be used
+            event_name: whether event is send after epoch or batch.
+                    Set of values: ``"after_epoch", "after_batch"``
+            data: event data (dictionary)
 
         Returns:
             None
         """
-        if not self.save_path:
-            raise ConfigError("No `save_path` is provided for Keras model!")
-        elif isinstance(self.save_path, Path) and not self.save_path.parent.is_dir():
-            raise ConfigError("Provided save path is incorrect!")
-        else:
-            opt_path = "{}_opt.json".format(str(self.save_path.resolve()))
-            weights_path = "{}.h5".format(str(self.save_path.resolve()))
-            print("[ saving model: {} ]".format(opt_path))
-            self.model.save_weights(weights_path)
+        if event_name == "after_epoch":
+            self.epochs_done = data["epochs_done"]
+            self.batches_seen = data["batches_seen"]
+            self.train_examples_seen = data["train_examples_seen"]
+        return
 
-        save_json(self.opt, opt_path)
 
-        return True
+class KerasWrapper(KerasModel):
+    """A wrapper over external Keras models. It is used, for example,
+    to wrap :class:`~deeppavlov.models.morpho_tagger.network.CharacterTagger`.
+    A subclass of :class:`~deeppavlov.core.models.keras_model.KerasModel`
 
-    def mlp(self, opt):
-        """
-        Example of model function
-        Build un-compiled multilayer perceptron model
+    Attributes:
+        cls: the class to be wrapped
+        save_path: the path where model is saved
+        load_path: the path from where model is loaded
+        mode: usage mode
+        **kwargs: a dictionary containing model parameters specified in the main part
+            of json config that corresponds to the model
+    """
+    def __init__(self, cls: type, save_path: Optional[str] = None,
+                 load_path: Optional[str] = None, mode: str = None,
+                 **kwargs) -> None:
+        # Calls parent constructor. Results in creation of save_folder if it doesn't exist
+        super().__init__(save_path=save_path, load_path=load_path, mode=mode)
+
+        # Dicts are mutable! To prevent changes in config dict outside this class
+        # we use deepcopy
+        opt = deepcopy(kwargs)
+
+        # Finds all input parameters of the network __init__ to pass them into network later
+        network_parameter_names = list(inspect.signature(cls.__init__).parameters)
+        # Fills all provided parameters from opt (opt is a dictionary formed from the model
+        # json config file, except the "name" field)
+        network_parameters = {par: opt[par] for par in network_parameter_names if par in opt}
+        self._net = cls(**network_parameters)
+
+        # Finds all parameters for network train to pass them into train method later
+        train_parameters_names = list(inspect.signature(self._net.train_on_batch).parameters)
+
+        # Fills all provided parameters from opt
+        train_parameters = {par: opt[par] for par in train_parameters_names if par in opt}
+        self.train_parameters = train_parameters
+        self.opt = opt
+
+        # Tries to load the model from model `load_path`, if it is available
+        self.load()
+
+    def load(self) -> None:
+        """Checks existence of the model file, loads the model if the file exists"""
+
+        # Checks presence of the model files
+        if self.load_path.exists():
+            path = str(self.load_path.resolve())
+            log.info('[loading model from {}]'.format(path))
+            self._net.load(path)
+
+    def save(self) -> None:
+        """Saves model to the save_path, provided in config. The directory is
+        already created by super().__init__, which is called in __init__ of this class"""
+        path = str(self.save_path.absolute())
+        log.info('[saving model to {}]'.format(path))
+        self._net.save(path)
+
+    def train_on_batch(self, *args) -> None:
+        """Trains the model on a single batch.
+
         Args:
-            opt: dictionary of parameters
-
-        Returns:
-            un-compiled Keras model
+            *args: the list of network inputs.
+            Last element of `args` is the batch of targets,
+            all previous elements are training data batches
         """
-        inp = Input(shape=opt['inp_shape'])
-        output = inp
-        for i in range(opt['n_layers']):
-            output = Dense(opt['layer_size'], activation='relu')(output)
-        output = Dense(1, activation='softmax')(output)
-        model = Model(inputs=inp, outputs=output)
-        return model
+        *data, labels = args
+        self._net.train_on_batch(data, labels)
+
+    def __call__(self, *x_batch, **kwargs) -> Union[List, np.ndarray]:
+        """
+        Predicts answers on batch elements.
+
+        Args:
+            instance: a batch to predict answers on
+        """
+        with self.graph.as_default():
+            K.set_session(self.sess)
+            return self._net.predict_on_batch(x_batch, **kwargs)
+
+
+class LRScheduledKerasModel(LRScheduledModel, KerasModel):
+    """
+    KerasModel enhanced with optimizer, learning rate and momentum
+    management and search.
+    """
+    def __init__(self, **kwargs):
+        """
+        Initialize model with given parameters
+
+        Args:
+            **kwargs: dictionary of parameters
+        """
+        if isinstance(kwargs.get("learning_rate"), float) and isinstance(kwargs.get("learning_rate_decay"), float):
+            KerasModel.__init__(self, **kwargs)
+        else:
+            KerasModel.__init__(self, **kwargs)
+            LRScheduledModel.__init__(self, **kwargs)
 
     @abstractmethod
-    def reset(self):
+    def get_optimizer(self):
+        """
+        Return instance of keras optimizer
+
+        Args:
+            None
+        """
         pass
+
+    @overrides
+    def _init_learning_rate_variable(self):
+        """
+        Initialize learning rate
+
+        Returns:
+            None
+        """
+        return None
+
+    @overrides
+    def _init_momentum_variable(self):
+        """
+        Initialize momentum
+
+        Returns:
+            None
+        """
+        return None
+
+    @overrides
+    def get_learning_rate_variable(self):
+        """
+        Extract value of learning rate from optimizer
+
+        Returns:
+            learning rate value
+        """
+        return self.get_optimizer().lr
+
+    @overrides
+    def get_momentum_variable(self):
+        """
+        Extract values of momentum variables from optimizer
+
+        Returns:
+            optimizer's `rho` or `beta_1`
+        """
+        optimizer = self.get_optimizer()
+        if hasattr(optimizer, 'rho'):
+            return optimizer.rho
+        elif hasattr(optimizer, 'beta_1'):
+            return optimizer.beta_1
+        return None
+
+    @overrides
+    def _update_graph_variables(self, learning_rate: float = None, momentum: float = None):
+        """
+        Update graph variables setting giving `learning_rate` and `momentum`
+
+        Args:
+            learning_rate: learning rate value to be set in graph (set if not None)
+            momentum: momentum value to be set in graph (set if not None)
+
+        Returns:
+            None
+        """
+        if learning_rate is not None:
+            K.set_value(self.get_learning_rate_variable(), learning_rate)
+            # log.info(f"Learning rate = {learning_rate}")
+        if momentum is not None:
+            K.set_value(self.get_momentum_variable(), momentum)
+            # log.info(f"Momentum      = {momentum}")
+
+    def process_event(self, event_name: str, data: dict):
+        """
+        Process event after epoch
+        Args:
+            event_name: whether event is send after epoch or batch.
+                    Set of values: ``"after_epoch", "after_batch"``
+            data: event data (dictionary)
+
+        Returns:
+            None
+        """
+        if (isinstance(self.opt.get("learning_rate", None), float) and
+                isinstance(self.opt.get("learning_rate_decay", None), float)):
+            pass
+        else:
+            if event_name == 'after_train_log':
+                if (self.get_learning_rate_variable() is not None) and ('learning_rate' not in data):
+                    data['learning_rate'] = float(K.get_value(self.get_learning_rate_variable()))
+                    # data['learning_rate'] = self._lr
+                if (self.get_momentum_variable() is not None) and ('momentum' not in data):
+                    data['momentum'] = float(K.get_value(self.get_momentum_variable()))
+                    # data['momentum'] = self._mom
+            else:
+                super().process_event(event_name, data)

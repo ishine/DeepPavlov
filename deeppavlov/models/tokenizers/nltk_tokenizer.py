@@ -12,29 +12,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import List
 
 import nltk
 
-from deeppavlov.core.models.inferable import Inferable
 from deeppavlov.core.common.registry import register
+from deeppavlov.core.models.component import Component
+
 
 @register("nltk_tokenizer")
-class NLTKTokenizer(Inferable):
+class NLTKTokenizer(Component):
+    """Class for splitting texts on tokens using NLTK
 
-    def __init__(self, save_path=None, download=False, tokenizer="wordpunct_tokenize", *args, **kwargs):
-        super().__init__(save_path=save_path)
+    Args:
+        tokenizer: tokenization mode for `nltk.tokenize`
+        download: whether to download nltk data
+
+    Attributes:
+        tokenizer: tokenizer instance from nltk.tokenizers
+    """
+    def __init__(self, tokenizer: str = "wordpunct_tokenize", download: bool = False,
+                 *args, **kwargs):
         if download:
             nltk.download()
         self.tokenizer = getattr(nltk.tokenize, tokenizer, None)
         if not callable(self.tokenizer):
             raise AttributeError("Tokenizer {} is not defined in nltk.tokenizer".format(tokenizer))
 
-    def infer(self, instance, *args, **kwargs):
-        if type(instance) is str:
-            return " ".join(self.tokenizer(instance))
+    def __call__(self, batch: List[str]) -> List[List[str]]:
+        """Tokenize given batch
 
-        elif type(instance) is list:
-            tokenized_batch = []
-            for text in instance:
-                tokenized_batch.append(" ".join(self.tokenizer(text)))
-            return tokenized_batch
+        Args:
+            batch: list of text samples
+
+        Returns:
+            list of lists of tokens
+        """
+        return [self.tokenizer(sent) for sent in batch]

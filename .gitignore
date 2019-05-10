@@ -103,6 +103,12 @@ ENV/
 #IDEA
 .idea/
 
+#Atom IDE
+.ftpconfig
+
+#vscode IDE
+.vscode
+
 #GIT
 .git/
 
@@ -111,6 +117,7 @@ download/
 
 #project test
 /test/
+.pytest_cache
 
 # project data
 /data/
